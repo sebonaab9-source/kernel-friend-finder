@@ -284,7 +284,7 @@ export const submitAnswer = createServerFn({ method: "POST" })
         .maybeSingle(),
       supabase
         .from("answers")
-        .select("id, player_id, is_correct, created_at, players(team)")
+        .select("id, player_id, is_correct, created_at")
         .eq("room_id", room.id)
         .eq("question_id", currentId),
     ]);
@@ -298,7 +298,9 @@ export const submitAnswer = createServerFn({ method: "POST" })
     const priorCorrect = existing
       .filter((a) => a.is_correct)
       .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
-    const teamOfAns = (a: any) => (Array.isArray(a.players) ? a.players[0]?.team : a.players?.team);
+    const { data: roomPlayers } = await supabase.from("players").select("id, team").eq("room_id", room.id);
+    const teamMap = new Map((roomPlayers ?? []).map((p: any) => [p.id, p.team]));
+    const teamOfAns = (a: any) => teamMap.get(a.player_id);
     const firstCorrect = priorCorrect[0];
     const myTeamAlready = priorCorrect.some((a) => teamOfAns(a) === player.team);
     const withinWindow = firstCorrect && now - Date.parse(firstCorrect.created_at) <= SAME_TIME_MS;
@@ -334,7 +336,7 @@ export const submitAnswer = createServerFn({ method: "POST" })
     // İlk doğru: halat o takıma çekilir. Diğer takım aynı anda bilirse halat geri döner (yerinde kalır).
     if (isCorrect) {
       const dir = player.team === 1 ? -STEP : STEP;
-      const delta = firstCorrect ? dir : dir;
+      const delta = dir;
       const next = Math.max(-WIN_LIMIT, Math.min(WIN_LIMIT, room.rope_position + delta));
       // Yarışma yalnızca sorular bitince sona erer; halat sınıra ulaşsa bile devam eder.
       await supabase
