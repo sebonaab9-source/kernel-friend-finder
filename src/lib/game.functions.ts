@@ -214,7 +214,7 @@ export const getRoomState = createServerFn({ method: "POST" })
         .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
       if (corrects.length) {
         const teams = new Set(corrects.map((a) => teamOf.get(a.player_id)));
-        resolved = teams.has(1) && teams.has(2) || Date.now() - Date.parse(corrects[0].created_at) > SAME_TIME_MS;
+        resolved = teams.has(1) && teams.has(2) || Date.now() - Date.parse(corrects[0]!.created_at) > SAME_TIME_MS;
       }
       const mine = currentAnswers.find((a) => a.player_id === data.playerId);
       if (mine) me = { answer: mine.answer_text ?? "", isCorrect: mine.is_correct };
@@ -229,8 +229,8 @@ export const getRoomState = createServerFn({ method: "POST" })
     }
     for (const list of byQ.values()) {
       list.sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
-      const firstTeam = teamOf.get(list[0].player_id);
-      const t0 = Date.parse(list[0].created_at);
+      const firstTeam = teamOf.get(list[0]!.player_id);
+      const t0 = Date.parse(list[0]!.created_at);
       if (firstTeam === 1 || firstTeam === 2) scores[firstTeam] += FIRST_POINTS;
       const other = list.find(
         (a) => teamOf.get(a.player_id) !== firstTeam && Date.parse(a.created_at) - t0 <= SAME_TIME_MS,
