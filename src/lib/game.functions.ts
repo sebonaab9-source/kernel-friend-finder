@@ -3,6 +3,10 @@ import { createServerFn } from "@tanstack/react-start";
 const QUESTION_COUNT = 10;
 const STEP = 10;
 const WIN_LIMIT = 50;
+// Bu süre içinde iki takım da doğru bilirse "aynı anda" sayılır: halat yerinde kalır.
+const SAME_TIME_MS = 1500;
+const FIRST_POINTS = 2;
+const SECOND_POINTS = 1;
 
 export type RoomStatus = "WAITING" | "READY" | "PLAYING" | "PAUSED" | "FINISHED";
 
@@ -173,7 +177,7 @@ export const getRoomState = createServerFn({ method: "POST" })
             .eq("id", currentId)
             .maybeSingle()
         : Promise.resolve({ data: null }),
-      supabase.from("answers").select("player_id, question_id, answer_text, is_correct").eq("room_id", room.id),
+      supabase.from("answers").select("player_id, question_id, answer_text, is_correct, created_at").eq("room_id", room.id),
     ]);
 
     const players = playersRes.data;
@@ -182,7 +186,11 @@ export const getRoomState = createServerFn({ method: "POST" })
       question_id: string;
       answer_text: string;
       is_correct: boolean;
+      created_at: string;
     }>;
+    const teamOf = new Map<string, number>(
+      (playersRes.data ?? []).map((p: any) => [p.id, p.team as number]),
+    );
 
     if (needsQuestion && qRes.data) {
       const q = qRes.data;
@@ -201,20 +209,34 @@ export const getRoomState = createServerFn({ method: "POST" })
       const currentAnswers = allAnswers.filter((a) => a.question_id === currentId);
       answeredIds = currentAnswers.map((a) => a.player_id);
       // Soru yalnızca doğru cevap verildiğinde çözülür; yanlış cevap veren denemeye devam eder.
-      resolved = currentAnswers.some((a) => a.is_correct);
+      const corrects = currentAnswers
+        .filter((a) => a.is_correct)
+        .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+      if (corrects.length) {
+        const teams = new Set(corrects.map((a) => teamOf.get(a.player_id)));
+        resolved = teams.has(1) && teams.has(2) || Date.now() - Date.parse(corrects[0]!.created_at) > SAME_TIME_MS;
+      }
       const mine = currentAnswers.find((a) => a.player_id === data.playerId);
       if (mine) me = { answer: mine.answer_text ?? "", isCorrect: mine.is_correct };
     }
 
-    // Takım bazında toplam doğru sayısı (tüm oyun boyunca)
-    const teamOf = new Map<string, number>(
-      (players ?? []).map((p: any) => [p.id, p.team as number]),
-    );
+    // Puan: soruyu ilk doğru bilen takım 2, aynı anda (kısa süre içinde) bilen diğer takım 1 puan
     const scores: { 1: number; 2: number } = { 1: 0, 2: 0 };
+    const byQ = new Map<string, typeof allAnswers>();
     for (const a of allAnswers) {
       if (!a.is_correct) continue;
-      const t = teamOf.get(a.player_id);
-      if (t === 1 || t === 2) scores[t] += 1;
+      byQ.set(a.question_id, [...(byQ.get(a.question_id) ?? []), a]);
+    }
+    for (const list of byQ.values()) {
+      list.sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+      const firstTeam = teamOf.get(list[0]!.player_id);
+      const t0 = Date.parse(list[0]!.created_at);
+      if (firstTeam === 1 || firstTeam === 2) scores[firstTeam] += FIRST_POINTS;
+      const other = list.find(
+        (a) => teamOf.get(a.player_id) !== firstTeam && Date.parse(a.created_at) - t0 <= SAME_TIME_MS,
+      );
+      const ot = other ? teamOf.get(other.player_id) : undefined;
+      if (ot === 1 || ot === 2) scores[ot] += SECOND_POINTS;
     }
 
     return {
@@ -262,7 +284,7 @@ export const submitAnswer = createServerFn({ method: "POST" })
         .maybeSingle(),
       supabase
         .from("answers")
-        .select("id, player_id, is_correct")
+        .select("id, player_id, is_correct, created_at")
         .eq("room_id", room.id)
         .eq("question_id", currentId),
     ]);
@@ -271,8 +293,18 @@ export const submitAnswer = createServerFn({ method: "POST" })
     const qRow = qRes.data;
     if (!qRow) throw new Error("Soru bulunamadı");
     const q = { ...qRow, correct_answer: qRow.correct_answer_text ?? "" };
-    const existing = answersRes.data;
-    if ((existing ?? []).some((a: any) => a.is_correct))
+    const existing = (answersRes.data ?? []) as any[];
+    const now = Date.now();
+    const priorCorrect = existing
+      .filter((a) => a.is_correct)
+      .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+    const { data: roomPlayers } = await supabase.from("players").select("id, team").eq("room_id", room.id);
+    const teamMap = new Map((roomPlayers ?? []).map((p: any) => [p.id, p.team]));
+    const teamOfAns = (a: any) => teamMap.get(a.player_id);
+    const firstCorrect = priorCorrect[0];
+    const myTeamAlready = priorCorrect.some((a) => teamOfAns(a) === player.team);
+    const withinWindow = firstCorrect && now - Date.parse(firstCorrect.created_at) <= SAME_TIME_MS;
+    if (firstCorrect && (myTeamAlready || !withinWindow))
       throw new Error("Bu soru çözüldü, sıradaki soru geliyor");
 
     const norm = (v: string) => v.trim().toLocaleLowerCase("tr-TR").replace(/\s+/g, " ");
@@ -287,7 +319,7 @@ export const submitAnswer = createServerFn({ method: "POST" })
     if (mine) {
       const { error: updErr } = await supabase
         .from("answers")
-        .update({ answer_text: data.answer, is_correct: isCorrect })
+        .update({ answer_text: data.answer, is_correct: isCorrect, created_at: new Date(now).toISOString() })
         .eq("id", mine.id);
       if (updErr) throw new Error("Cevap kaydedilemedi");
     } else {
@@ -301,9 +333,10 @@ export const submitAnswer = createServerFn({ method: "POST" })
       if (insErr) throw new Error("Cevap kaydedilemedi");
     }
 
-    const someoneAlreadyCorrect = (existing ?? []).some((a: any) => a.is_correct);
-    if (isCorrect && !someoneAlreadyCorrect) {
-      const delta = player.team === 1 ? -STEP : STEP;
+    // İlk doğru: halat o takıma çekilir. Diğer takım aynı anda bilirse halat geri döner (yerinde kalır).
+    if (isCorrect) {
+      const dir = player.team === 1 ? -STEP : STEP;
+      const delta = dir;
       const next = Math.max(-WIN_LIMIT, Math.min(WIN_LIMIT, room.rope_position + delta));
       // Yarışma yalnızca sorular bitince sona erer; halat sınıra ulaşsa bile devam eder.
       await supabase
